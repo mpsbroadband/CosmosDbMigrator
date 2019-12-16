@@ -3,27 +3,31 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using Microsoft.Azure.Documents;
 using Microsoft.Azure.Documents.Linq;
-using Newtonsoft.Json;
 using NodaTime;
 
 namespace CosmosDbMigrator
 {
     class Program
     {
-        private const string SourceUrl = "https://livearenastage.documents.azure.com:443/";
-        private const string TargetUrl = "https://livearenastage.documents.azure.com:443/";
+        private const string SourceUrl = "";
+        private const string TargetUrl = "";
 
         private const string SourceAuthKey =
-            "Y4KrcfgA4E2f4G40Cow4JOQEqACQSzl3w8SRklJVS1wwHYiRUOCjgfWoQLuSBYoKvO5kNl9LF0K88XXx6wTuqg==";
+            "zWLazWb9UibqZ5o8FGd242UypdreQrRAnR0JlBCXA65X82xljZ6ZnGQUcAp7nvt5nzpJ6YFmANPnl9juIXN6IA==";
 
         private const string TargetAuthKey =
-            "Y4KrcfgA4E2f4G40Cow4JOQEqACQSzl3w8SRklJVS1wwHYiRUOCjgfWoQLuSBYoKvO5kNl9LF0K88XXx6wTuqg==";
+            "zWLazWb9UibqZ5o8FGd242UypdreQrRAnR0JlBCXA65X82xljZ6ZnGQUcAp7nvt5nzpJ6YFmANPnl9juIXN6IA==";
 
-        private const string CollectionName = "Event";
+        private const string CollectionName = "Order";
 
         private const string SourceDatabaseName = "Statistics";
-        private const string TargetDatabaseName = "Statistics4";
+        private const string TargetDatabaseName = "Statistic";
+
+        private const bool Transform = false;
+
+        private const int Skip = 0;
 
         private static List<TargetEvent> _cache;
 
@@ -49,36 +53,80 @@ namespace CosmosDbMigrator
                         ConnectionProtocol = Protocol.Tcp
                     });
 
-            var query =
-                sourceClient.CreateDocumentQuery<SourceEvent>(
-                    UriFactory.CreateDocumentCollectionUri(SourceDatabaseName, CollectionName),
-                    new FeedOptions
-                    {
-                        MaxDegreeOfParallelism = -1,
-                        EnableCrossPartitionQuery = true
-                    }).OrderBy(e => e.timestamp).AsDocumentQuery();
-
-            var dict = JsonConvert.DeserializeObject<Dictionary<string, string>>(query.ToString());
-            var queryString = dict["query"];
-
-            var count = 0;
-            while (query.HasMoreResults)
+            if (Transform)
             {
-                var result = query.ExecuteNextAsync<SourceEvent>().Result;
-                var tasks = new List<Task>();
+                var query =
+                    sourceClient.CreateDocumentQuery<SourceEvent>(
+                        UriFactory.CreateDocumentCollectionUri(SourceDatabaseName, CollectionName),
+                        new FeedOptions
+                        {
+                            MaxDegreeOfParallelism = -1,
+                            EnableCrossPartitionQuery = true
+                        }).OrderBy(e => e.timestamp).AsDocumentQuery();
 
-                foreach (var sourceEvent in result)
+                var count = 0;
+                while (query.HasMoreResults)
                 {
-                    var targetEvent = CreateEvent(sourceEvent);
+                    var result = query.ExecuteNextAsync<SourceEvent>().Result;
+                    var tasks = new List<Task>();
 
-                    tasks.Add(targetClient.UpsertDocumentAsync(
-                        UriFactory.CreateDocumentCollectionUri(TargetDatabaseName, CollectionName), targetEvent));
+                    foreach (var sourceEvent in result)
+                    {
+                        if (count >= Skip)
+                        {
+                            var targetEvent = CreateEvent(sourceEvent);
+
+                            tasks.Add(targetClient.UpsertDocumentAsync(
+                                UriFactory.CreateDocumentCollectionUri(TargetDatabaseName, CollectionName),
+                                targetEvent));
+                        }
+
+                        else
+                        {
+                            tasks.Add(Task.Run(() => { }));
+                        }
+                    }
+
+                    count += tasks.Count;
+                    Task.WhenAll(tasks).Wait();
+                    var percentage = (int)Math.Round(_cache.Count / (double)count * 100);
+                    Console.WriteLine("Read: {0}. Written: {1}. ({2}%)", count, _cache.Count, percentage);
                 }
+            }
+            else
+            {
+                var query =
+                    sourceClient.CreateDocumentQuery<Document>(
+                        UriFactory.CreateDocumentCollectionUri(SourceDatabaseName, CollectionName),
+                        new FeedOptions
+                        {
+                            MaxDegreeOfParallelism = -1,
+                            EnableCrossPartitionQuery = true
+                        }).OrderBy(d => d.Timestamp).AsDocumentQuery();
 
-                count += tasks.Count;
-                Task.WhenAll(tasks).Wait();
-                var percentage = (int)Math.Round(_cache.Count / (double) count * 100);
-                Console.WriteLine("Read: {0}. Written: {1}. ({2}%)", count, _cache.Count, percentage);
+                var count = 0;
+                while (query.HasMoreResults)
+                {
+                    var result = query.ExecuteNextAsync<Document>().Result;
+                    var tasks = new List<Task>();
+
+                    foreach (var document in result)
+                    {
+                        if (count >= Skip)
+                        {
+                            tasks.Add(targetClient.UpsertDocumentAsync(
+                                UriFactory.CreateDocumentCollectionUri(TargetDatabaseName, CollectionName), document));
+                        }
+                        else
+                        {
+                            tasks.Add(Task.Run(() => { }));
+                        }
+                    }
+
+                    count += tasks.Count;
+                    Task.WhenAll(tasks).Wait();
+                    Console.WriteLine("Copied {0} documents.", count);
+                }
             }
         }
 
